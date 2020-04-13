@@ -1,0 +1,473 @@
+---
+title: "Fig3_exogenous"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+if (!require("install.load")) {
+  install.packages("install.load")
+  library(install.load)
+}
+
+# CRAN packages
+list.of.packages <- c("stringi", "tidyverse", "vegan", "gplots", "circlize", "ggcorrplot")
+
+install.load::install_load(list.of.packages)
+
+# Bioconductor packages
+if (!require("ComplexHeatmap")) {
+  source("https://bioconductor.org/biocLite.R")
+  biocLite("ComplexHeatmap")
+  library("ComplexHeatmap")
+}
+
+# Functions to load
+subset_and_transpose <- function(taxon_level) {
+  exgenfam <- exrib[exrib$level == as.character(taxon_level), ]
+  exgenfam <- exgenfam[, -c(1:4)]
+  
+  # Remove col with NA
+  exgenfam <- exgenfam[, colSums(is.na(exgenfam)) < nrow(exgenfam)]
+  
+  # Remove rows with no reads
+  exgenfam <- exgenfam[which(rowSums(exgenfam[, 2:ncol(exgenfam)]) > 0),]
+  
+  # Order by abundance
+  exgenfam <- exgenfam[order(rowSums(exgenfam[, 2:ncol(exgenfam)]), 
+                             decreasing = TRUE),]
+  
+  # Transpose
+  taxa <- exgenfam$name
+  texo <- as.data.frame(t(exgenfam[,-1]))
+  names(texo) <- taxa
+  texo <- data.frame(filename = rownames(texo), texo, stringsAsFactors = FALSE)
+  row.names(texo) <- seq(1, nrow(texo))
+  
+  return(texo)
+}
+
+top_n_colnames <- function(n, matrix) {
+  sums <- colSums(matrix)
+  sums <- sums[order(sums, decreasing = TRUE)]
+  names(sums)[1:n]
+}
+
+reduce_by_incidence <- function(matrix, fraction) {
+  inc <- apply(matrix, 2, function(x) x > 0) %>%
+  colSums %>%
+  sapply(., function(x) x / ncol(matrix))
+  ot <- names(inc)[inc > fraction]
+  red <- matrix[, colnames(matrix) %in% ot]
+  return(red)
+}
+
+reduce_by_incidence_names <- function(matrix, fraction) {
+  inc <- apply(matrix, 2, function(x) x > 0) %>%
+  colSums %>%
+  sapply(., function(x) x / nrow(matrix))
+  names(inc)[inc >= fraction]
+}
+
+# ggplot theme parameters
+colors = c("blue", "white", "red"); legend.title = "Corr"; show.diag = FALSE; 
+    colors = c("blue", "white", "red"); outline.color = "gray"; 
+    hc.order = FALSE; hc.method = "complete"; lab = FALSE; lab_col = "black"; 
+    lab_size = 4; sig.level = 0.05; insig = c("pch", 
+        "blank"); pch = 4; pch.col = "black"; pch.cex = 5; tl.cex = 12; 
+    tl.col = "black"; tl.srt = 45; ggtheme = ggplot2::theme_minimal
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r load data}
+# Load clinical and expression data
+load("../exceRpt/counts.rpm.protein.rpkm.clinical.Rdata")
+clinical <- clinical %>%
+  mutate(filename = make.names(filename))
+
+# Load RPM of cumulative ribosomal counts
+exrib <- read.table("../exceRpt/2017-01-21/exceRpt_exogenousRibosomal_taxonomyCumulative_ReadsPerMillion.txt",
+                  sep = "\t", header = TRUE, as.is = TRUE, fill = TRUE)
+
+# Load cibersort results
+# Read in data and exclude samples with insignificant pvals
+cib.out <- read.csv("../deconvolution/cibersort/CIBERSORT.Output_Job3.csv") %>%
+  filter(P.value <= 0.05) %>%    # remove high pvals
+  dplyr::select(-P.value, -Pearson.Correlation, -RMSE)
+```
+
+# Phylum heatmap and dendrogram
+
+```{r phylum}
+# Grab just phyla
+phy <- subset_and_transpose("phylum")
+
+# subset to clinical dataset
+phy <- phy %>%
+  filter(filename %in% make.names(clinical$filename)) %>%
+  column_to_rownames("filename")
+
+# Grab the most abundant columns
+phy.top.cols <- top_n_colnames(7, phy)
+phy <- phy[, phy.top.cols]
+
+# Scale for plotting
+mat_scaled = apply(phy, 2, scale)
+rownames(mat_scaled) <- row.names(phy)
+
+# Define colors
+as.cols <- RColorBrewer::brewer.pal(4, "Spectral")
+sarp.cols <- RColorBrewer::brewer.pal(6, "Set1")
+
+# Match order of clinical data with exogenous matrix
+matches <- match(rownames(phy), make.names(clinical$filename))
+as <-  clinical$Asthma.Severity[matches]
+sarp  <-  as.character(clinical$SARP.Cluster.Designation[matches])
+sarp[is.na(sarp)] <- "unknown"
+sarp <- factor(sarp, levels = c("1", "2", "3", "4", "5", "unknown"),
+               ordered = TRUE)
+
+# ComplexHeatmap plot
+hm1 <- Heatmap(mat_scaled, name = "Scaled RPM", show_row_names = FALSE, km = 3, 
+                   show_column_dend = FALSE, column_title = "") 
+hm2 <- Heatmap(as, name = "Asthma Severity", 
+          width = unit(5, "mm"), show_row_names = FALSE, col = as.cols) 
+hm3 <- Heatmap(sarp, 
+          name = "SARP Cluster", 
+          width = unit(5, "mm"), show_row_names = FALSE,
+          col = sarp.cols)
+ht_list <- hm1 + hm2 + hm3
+
+gb = grid.grabExpr(draw(ht_list))
+
+cowplot::save_plot("../figures/exogenous_phylum_heatmap.png", gb, base_height = 5, base_width = 5)
+```
+
+```{r boxplots of proteobacteria by severity and sarp}
+# Retrieve clusters
+clus = row_order(hm1) %>%
+  lapply(., data.frame)
+
+# label clusters
+for (c in 1:length(clus)) {
+  clus[[c]]$cluster <- c
+}
+
+clus <- clus %>%
+  bind_rows()
+names(clus)[1] <- "row"
+
+# Assign clusters
+mat_scaled <- data.frame(mat_scaled)
+mat_scaled$cluster[clus$row] <- clus$cluster
+
+mat_scaled %>%
+  mutate(filename = rownames(mat_scaled)) %>%
+  gather(phylum, rpm, -filename, -cluster) %>%
+  left_join(., clinical) %>%
+  select(phylum, rpm, cluster, Asthma.Severity, SARP.Cluster.Designation) %>%
+  gather(catvar, value, -phylum, -rpm, -cluster) %>%
+  filter(phylum == "Proteobacteria") %>%
+  ggplot(aes(value, rpm)) +
+  geom_boxplot() +
+  facet_grid(cluster ~ catvar, scales = "free") +
+  theme_bw() +
+  labs(x = "", y = "Proteobacteria RPM") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggsave("../figures/boxplot_proteobacteria_cluster-by-AsthSev-SARP.pdf", 
+         height = 5, width = 5)
+
+
+
+```
+
+```{r fishers exact test for enrichment}
+fet.df <- data.frame(sarp = sarp, as = as, cluster = mat_scaled$cluster)
+
+fisher.test(fet.df$as, fet.df$cluster)
+fisher.test(fet.df$sarp, fet.df$cluster)
+```
+
+
+
+```{r correlation of genus with clinical continuous vars}
+# Retrieve genus level
+gen <- subset_and_transpose("genus") %>%
+  filter(filename %in% make.names(clinical$filename)) %>%
+  column_to_rownames("filename")
+
+# Reduce to orgs found in > 10% of samples
+red.gen <- reduce_by_incidence(gen, 0.05) %>%
+  as.matrix
+
+# Identify vars that are of interest for correlations
+continuous <- c("Age.at.Visit",  "BMI", "Hospitalizations..Past.Year.", "Hospitalizations..Lifetime.", "Intubations", "Total.Pack.Years", "ACT.Score", "Age.SX.Onset", "Age.Diagnosis","ICS.Total", "OCS.Total", "Number.of.OCS", "FENO", "X.POST..FEV1.FVC.Ratio",  "X.PRE..FEV1.FVC.Ratio", "BDR", "Platelets", "White.Count") 
+
+# Removed because they're so highly correlated
+ # "X.POST..FEV1", "X.POST..FVC", "X.PRE..FEV1", "X.PRE..FVC", "FVC.Pre...PRD", "FVC.Post...PRD", "FEV1.Pre...PRD", "FEV1.Post...PRD",
+
+clinical.conti <- clinical[,names(clinical) %in% continuous] %>%
+  apply(., 2, as.numeric)
+clinical.conti <- data.frame(Input.Sample = make.names(clinical$filename),
+                             clinical.conti)
+
+names(clinical.conti) <- c("Input.Sample", "Age", "BMI", "HPY", 
+                           "HIL", "Intubations", 
+                           "Total Pack Years", "ACT", "Age SX Onset", "Age DX", 
+                           "ICS", "OCS Total", "Number of OCS", "FENO", 
+                           "FEV1/FVC postBD", "FEV1/FVC preBD", 
+                           "BDR", "platelets", "white count")
+
+clin.cib.mat <- clinical.conti %>%
+  left_join(., cib.out) %>%
+  column_to_rownames(., var = "Input.Sample") %>%
+  as.matrix
+
+clin.cib.mat <- clin.cib.mat[match(rownames(red.gen), rownames(clin.cib.mat)),]  
+
+cor <- Hmisc::rcorr(red.gen, clin.cib.mat)
+
+# Reduce matrix to rownames as genus, colnames as clin or cib
+cor.red <- lapply(cor, function(x) x[row.names(x) %in% colnames(red.gen), 
+                                     !row.names(x) %in% colnames(red.gen)])
+
+# Remove rows without a correlation below the significance threshold
+excl.sig.level <- 0.005
+sigs <- apply(cor.red$P, 1, function(x) sum(x <= excl.sig.level) > 0)
+
+cor.red <- lapply(cor.red, function(x) x[sigs, ]) %>%
+  # make a column for genus
+  lapply(., function(x) mutate(data.frame(x), genus = rownames(x))) %>%
+  # convert to long format
+  lapply(., function(x) gather(x, var, value, -genus))
+# Make a column for the matrix name
+for (n in names(cor.red)) {
+  cor.red[[n]]$mat <- n
+}
+
+# Define significance level for display
+sig.level <- 0.05
+# Bind into a single dataframe
+cor.df <- do.call(rbind, cor.red) %>%
+  filter(mat != "n") %>%
+  mutate(key.type = ifelse(
+    var %in% colnames(cib.out), "cells", "clinical")) %>%
+  spread(mat, value) %>%
+  mutate(signif = P <= sig.level) %>%
+  mutate(corr = r * signif)
+
+
+# Plot
+cor.df %>%
+  ggplot(aes(genus, var, fill = corr)) +
+  geom_tile(color = "gray") +
+  scale_fill_gradient2(low = colors[1], high = colors[3], 
+        mid = colors[2], midpoint = 0, limit = c(-1, 1), space = "Lab", 
+        name = legend.title) +
+  theme_bw() +
+  coord_flip() +
+  facet_grid(~key.type, scales = "free_x", space = "free") +
+    theme(axis.text.x = ggplot2::element_text(angle = tl.srt, 
+        vjust = 1, size = 11, hjust = 1), 
+        axis.text.y = ggplot2::element_text(size = 11),
+        strip.text.x = element_blank()) +
+  labs(x = "", y = "") +
+  ggsave("../figures/genus-clinical-cibersort_correlation.pdf", height = 6, width = 10)
+
+```
+
+```{r match to 16S}
+# Read in 16S data
+barcodes <- read.csv("../16S/CHAS_wPCRresults.csv")
+
+# Create a column that can be matched to clinical data
+barcodes$Study.ID <- gsub("-CL|-S$", "", barcodes$Collaborator.ID)
+
+# Subset to just CL samples for comparison
+barcodes <- barcodes[grep("-CL", barcodes$Collaborator.ID),]
+
+# Match to clinical data
+has.bulkRNAseq <- unique(barcodes$Study.ID)  %in% unique(clinical$Study.ID)
+
+# Only those samples that have bulkRNAseq data
+barcodes <- barcodes[has.bulkRNAseq,]
+
+# Match to RNAseq filename
+compbar <- barcodes %>%
+  dplyr::select(Collaborator.ID, Study.ID) %>%
+  left_join(., clinical) %>%
+  dplyr::select(Collaborator.ID, filename)
+
+# Read in barcode sequencing data
+barseq <- read.csv("../16S/MergedPercentTables/Genus_MergedPercentTable_cleaned.csv")
+
+x16S <- compbar %>%
+  left_join(., barseq, by = c("Collaborator.ID" = "sample.names")) %>%
+  dplyr::select(-Collaborator.ID, -base.name, -jax.id, -CL.S, -file.names)
+
+abun.names <- top_n_colnames(9, x16S[,-1])
+
+abun.names
+
+x16S <- x16S %>%
+  select(c(filename, abun.names)) %>%
+  gather(genus, rel.abun, -filename) %>%
+  mutate(method = "x16S")
+
+# Convert exceRpt genus to relative abundance PERCENT (to match 16S)
+gsum <- rowSums(gen) /100
+
+rel.gen <- gen %>%
+  apply(., 2, function(x) x / gsum) %>%
+  data.frame %>% 
+  mutate(filename = rownames(.)) %>%
+  filter(filename %in% x16S$filename) %>%
+  gather(genus, rel.abun, -filename) %>%
+  mutate(method = "exceRpt") %>%
+  filter(genus %in% x16S$genus) %>%
+  bind_rows(., x16S) %>%
+  spread(method, rel.abun) %>%
+  na.omit
+  
+rel.gen %>%
+  ggplot(aes(x = x16S, y = exceRpt)) +
+  geom_point() +
+  facet_wrap(~genus, scales = "free") +
+  theme_bw() +
+  labs(x = "16S",
+       y = "RNAseq") +
+  ggsave("../figures/scatter_16s-v-exceRpt_reduced.pdf", width = 40, height = 40)
+```
+
+
+```{r reduce by consistently observed orgs}
+barseq <- read.csv("../16S/MergedPercentTables/Genus_MergedPercentTable_cleaned.csv")
+
+x16S <- compbar %>%
+  left_join(., barseq, by = c("Collaborator.ID" = "sample.names")) %>%
+  dplyr::select(-Collaborator.ID, -base.name, -jax.id, -CL.S, -file.names)
+
+abun.names <- reduce_by_incidence_names(matrix = x16S[,-1], fraction = 1)
+
+x16S <- x16S %>%
+  select(c(filename, abun.names)) %>%
+  gather(genus, rel.abun, -filename) %>%
+  mutate(method = "x16S")
+
+# Convert exceRpt genus to relative abundance PERCENT (to match 16S)
+gsum <- rowSums(gen) /100
+
+rel.gen <- gen %>%
+  apply(., 2, function(x) x / gsum) %>%
+  data.frame %>% 
+  mutate(filename = rownames(.)) %>%
+  filter(filename %in% x16S$filename) %>%
+  gather(genus, rel.abun, -filename) %>%
+  mutate(method = "exceRpt") %>%
+  filter(genus %in% x16S$genus) %>%
+  bind_rows(., x16S) %>%
+  spread(method, rel.abun) %>%
+  na.omit
+  
+rel.gen %>%
+  ggplot(aes(x = x16S, y = exceRpt)) +
+  geom_point() +
+  stat_smooth(method = "lm") +
+  facet_wrap(~genus, scales = "free") +
+  ggsave("../figures/scatter_16s-v-exceRpt_reduced-by-incidence.pdf", width = 40, height = 40)
+```
+
+```{r check the most abundant organisms by RNAseq against those in 16S}
+gen.names <- reduce.to_n_most.abundant(n = 9, gen)
+
+barseq <- read.csv("../16S/MergedPercentTables/Genus_MergedPercentTable_cleaned.csv")
+
+x16S <- compbar %>%
+  left_join(., barseq, by = c("Collaborator.ID" = "sample.names")) %>%
+  dplyr::select(-Collaborator.ID, -base.name, -jax.id, -CL.S, -file.names) %>%
+  gather(genus, rel.abun, -filename) %>%
+  mutate(method = "x16S")
+
+# Convert exceRpt genus to relative abundance PERCENT (to match 16S)
+gsum <- rowSums(gen) / 100
+
+rel.gen <- gen %>%
+  apply(., 2, function(x) x / gsum) %>%
+  data.frame %>% 
+  mutate(filename = rownames(.)) %>%
+  filter(filename %in% x16S$filename) %>%
+  gather(genus, rel.abun, -filename) %>%
+  mutate(method = "exceRpt") %>%
+  bind_rows(., x16S) %>%
+  filter(genus %in% gen.names) %>%
+  spread(method, rel.abun) %>%
+  na.omit
+  
+rel.gen %>%
+  ggplot(aes(x = x16S, y = exceRpt)) +
+  geom_point() +
+  stat_smooth(method = "lm") +
+  facet_wrap(~genus, scales = "free") +
+  ggsave("../figures/scatter_16s-v-exceRpt_reduced-by-RNAseq.pdf", width = 40, height = 40)
+```
+
+This still looks shitty. What if I grab those that look best? 
+
+```{r}
+barseq <- read.csv("../16S/MergedPercentTables/Genus_MergedPercentTable_cleaned.csv")
+
+x16S <- compbar %>%
+  left_join(., barseq, by = c("Collaborator.ID" = "sample.names")) %>%
+  dplyr::select(-Collaborator.ID, -base.name, -jax.id, -CL.S, -file.names) %>%
+  gather(genus, rel.abun, -filename) %>%
+  mutate(method = "x16S")
+
+# Convert exceRpt genus to relative abundance PERCENT (to match 16S)
+gsum <- rowSums(gen) / 100
+
+rel.gen <- gen %>%
+  apply(., 2, function(x) x / gsum) %>%
+  data.frame %>% 
+  mutate(filename = rownames(.)) %>%
+  filter(filename %in% x16S$filename) %>%
+  gather(genus, rel.abun, -filename) %>%
+  mutate(method = "exceRpt") %>%
+  bind_rows(., x16S) %>%
+  spread(method, rel.abun) %>%
+  na.omit
+
+corrs <- data.frame(genus = unique(rel.gen$genus),
+                    p.val = rep(NA, length(unique(rel.gen$genus))))
+for (i in 1:nrow(corrs)) {
+  mdf <- rel.gen %>%
+    filter(genus == corrs$genus[i])
+  try({
+    m <- lm(exceRpt ~ x16S, data = mdf)
+    corrs$p.val[i] <- summary(m)$coefficients[2,4]
+  })
+}
+sig.corrs <- corrs$genus[corrs$p.val < 0.2] %>%
+  na.omit %>%
+  as.character
+sig.corrs
+
+rel.gen %>%
+  filter(genus %in% sig.corrs) %>%
+  ggplot(aes(x = x16S, y = exceRpt)) +
+  geom_point() +
+  stat_smooth(method = "lm") +
+  facet_wrap(~genus, scales = "free") +
+  theme_bw() +
+  labs(x = "16S",
+       y = "RNAseq") +
+  ggsave("../figures/scatter_16s-v-exceRpt_reduced-by-lm.pdf", height = 5, 
+         width = 5)
+  
+```
+

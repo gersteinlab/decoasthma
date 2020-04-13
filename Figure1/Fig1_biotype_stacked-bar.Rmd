@@ -1,0 +1,145 @@
+---
+title: "Fig1_biotype_statcked-bar"
+author: "Daniel Spakowicz"
+date: "5/9/2018"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+if (!require("install.load")) {
+  install.packages("install.load")
+  library(install.load)
+}
+
+# CRAN packages
+list.of.packages <- c("tidyverse", "knitr", "RColorBrewer")
+
+install.load::install_load(list.of.packages)
+
+```
+
+```{r load data}
+# Load clinical data (just to get the final filename set)
+load("../exceRpt/counts.rpm.protein.rpkm.clinical.Rdata")
+sample.set <- make.names(clinical$filename)
+rm(all.mats)
+rm(all.mats.protein)
+rm(rpkm.mats)
+rm(clinical)
+
+# Load biotype informaiton
+biotype <- read.table("../exceRpt/2017-01-21/exceRpt_biotypeCounts.txt",
+                      row.names = 1, sep = "\t", header = TRUE) %>%
+  t %>%
+  data.frame %>%
+  mutate(filename = row.names(.))
+
+readcounts <- read.table("../exceRpt/2017-01-21/exceRpt_readMappingSummary.txt") %>%
+  mutate(filename = make.names(rownames(.))) %>%
+  dplyr::select(c(filename, input))
+
+br <- left_join(biotype, readcounts)
+row.names(br) <- br$filename
+```
+
+```{r}
+# normalize to input
+brn <- br %>%
+  mutate_if(is.numeric, funs(. / input))
+            
+
+brn %>%
+  dplyr::select(filename, starts_with("exogenous"))%>%
+  gather("exogenous source", fraction, -filename) %>%
+  ggplot() +
+  geom_bar(aes(x = reorder(filename, -fraction), y = fraction, fill = `exogenous source`), stat = "identity") +
+  labs(x  = "Sample") +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+
+brn %>%
+  dplyr::select(filename, starts_with("exogenous"))%>%
+  filter(filename %in% `sample.set`) %>%
+  gather("exogenous source", fraction, -filename) %>%
+  ggplot() +
+  geom_bar(aes(x = reorder(filename, -fraction), y = fraction, fill = `exogenous source`), stat = "identity") +
+  labs(x  = "Sample") +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+```
+
+```{r}
+ho <- brn %>% 
+  select(-starts_with("Mt"), -starts_with("exogenous"),
+         -protein_coding, -retained_intron, -filename, -input) %>% 
+  rowSums()
+
+brn.f <- data.frame(exogenous = brn$exogenous_genomes + brn$exogenous_rRNA + brn$exogenous_miRNA,
+                    "human mt" = brn$Mt_rRNA + brn$Mt_tRNA,
+                    "human protein-coding" = brn$protein_coding,
+                    "human retained intron" = brn$retained_intron,
+                    "human other" = ho,
+                    filename = brn$filename,
+                    check.names = FALSE)
+
+
+
+brn.f %>%
+  gather(biotype, fraction, -filename) %>%
+  ggplot() +
+  geom_bar(aes(reorder(filename, -fraction), fraction, fill = biotype), stat = "identity")
+
+
+
+```
+```{r}
+grep(".*B\\.BSEQ.*", brn.f$filename)
+
+sums <- brn.f %>%
+  select_if(is.numeric) %>%
+  rowSums
+
+newcolors <- brewer.pal(5, "Spectral")  
+brn.f %>%
+  mutate_if(is.numeric, funs(. /`sums`)) %>%
+  mutate(source = ifelse(str_detect(filename, "B.BSEQ"), "blood", "sputum")) %>%
+  arrange(desc(exogenous))%>%
+  mutate(filename = factor(filename, filename)) %>%
+  gather(biotype, fraction, -filename, -source) %>%
+  ggplot() +
+  geom_bar(aes(filename, fraction, fill = biotype), 
+           stat = "identity") +
+  scale_fill_manual(values = newcolors) +
+  facet_grid(~source, scales = "free_x", space = "free_x") +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank()) +
+  labs(x = "Sample") +
+  ggsave("../figures/supplemental-fig1_biotype_stacked-bar.png", height = 4, width = 8)
+
+```
+
+```{r filter out non-blood samples}
+brn.f %>%
+  mutate_if(is.numeric, funs(. /`sums`)) %>%
+  arrange(desc(exogenous))%>%
+  filter(filename %in% sample.set) %>%
+  mutate(filename = factor(filename, filename)) %>%
+  gather(biotype, fraction, -filename) %>%
+  ggplot() +
+  geom_bar(aes(filename, fraction, fill = biotype), 
+           stat = "identity") +
+  scale_fill_manual(values = newcolors) +
+  theme(axis.text.x = element_blank(),
+        axis.title = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        panel.background = element_rect(fill = "white")) +
+  coord_flip() +
+  ggsave("../figures/fig1_biotype_stacked-bar.pdf", height = 2, width = 8)
+
+
+```
+

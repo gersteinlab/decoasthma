@@ -1,0 +1,253 @@
+---
+title: "batch-effects-check"
+author: "Daniel Spakowicz"
+date: "1/25/2018"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Load required packages
+if (!require("install.load")) {
+  install.packages("install.load")
+  library(install.load)
+}
+
+# CRAN packages
+list.of.packages <- c("gPCA")
+install.load::install_load(list.of.packages)
+
+# library(bladderbatch)
+# library(pamr)
+# library(limma)
+# library(gridExtra)
+# library(DESeq2)
+
+```
+
+The goal of this analysis is to determine whether batch effects should be corrected for in the processing of the CHAS project bulkRNAseq data. 
+
+The RNAseq data are loaded from exceRpt output files, either as counts or reads per million. 
+
+```{r load data}
+# Load exxpression and clinical data
+load("../exceRpt/counts.rpm.protein.rpkm.clinical.Rdata")
+```
+
+The clinical data are loaded from exceRpt_summary.Rmd, where the metadata processing and clinical data subsetting took place.
+
+
+```{r define batches}
+# Make and singleton batches into one... which doesn't really make sense but is 
+# needed to estimate these effects
+tflow <- table(clinical$flowcell)
+singletons <- which(tflow == 1)
+
+flowcell <- as.character(clinical$flowcell)
+flowcell[which(flowcell %in% names(singletons))] <- "singleton"
+
+# Set batches as a factor
+batch <- factor(flowcell)
+
+system.time({
+  x <- gPCA.batchdetect(t(all.mats[["qnorm.counts"]]), batch)
+})
+x$p.val
+
+prot.rpm <- gPCA.batchdetect(t(all.mats.protein[["rpm"]]), batch)
+prot.rpm$p.val
+
+prot.qnorm.rpm <- gPCA.batchdetect(t(all.mats.protein[["qnorm.rpm"]]), batch)
+prot.qnorm.rpm$p.val
+
+prot.rpkm <- gPCA.batchdetect(t(rpkm.mats[["protein.rpkm"]]), batch)
+prot.rpkm$p.val
+
+prot.qnorm.rpkm <- gPCA.batchdetect(t(rpkm.mats[["qnorm.protein.rpkm"]]), batch)
+prot.qnorm.rpkm$p.val
+```
+
+
+```{r, eval=FALSE}
+#~~~~~~~~~~~~
+# Integrate with SINCERA pipeline by adopting their object labels
+
+# Phenotype information
+pheno = red.meta
+# Expression data
+edata <- allmat
+
+# First make all integers -- why aren't they?
+edata <- apply(edata, 2, as.integer)
+# Reapply row names as genes
+row.names(edata) <- gene.names
+
+# Are any values less than 0?
+any(sum(as.vector(edata) < 0))
+
+# Remove genes with no variance
+vars <- apply(edata, 1, var)
+edata <- edata[vars > 0,]
+
+# Make and singleton batches into one... which doesn't really make sense
+tflow <- table(pheno$flowcell)
+singletons <- which(tflow == 1)
+
+pheno$flowcell <- as.character(pheno$flowcell)
+pheno$flowcell[which(pheno$flowcell %in% names(singletons))] <- "singleton"
+
+batch <- factor(pheno$flowcell)
+
+# Create the batch effect model
+modcombat = model.matrix(~1, data = pheno)
+
+
+# No longer used in favor of quantile normalizaiton
+# Variance stabilized transformation
+# nedata <- vst(edata)
+
+# Are any values less than 0?
+any(sum(as.vector(nedata) < 0))
+
+# Batch effect correction
+combat_nedata <- ComBat(dat = nedata, batch = batch, mod = modcombat,
+                      par.prior = TRUE, prior.plots = FALSE)
+
+batch_effects_vis <- function(pre, postnorm, postnormbatch) {
+  # Visualize potential batch effects pre-normalization
+  pca.check <- prcomp(t(pre))
+  # Visualize potential batch effects post-normalization
+  pca.check2 <- prcomp(t(postnorm))
+  # Visualize post normalization and batch correction
+  pca.check3 <- prcomp(t(postnormbatch))
+
+  # Plot all three pca's
+  par(mfrow = c(1, 3))
+  pre.norm <- plot(pca.check$x[,1], pca.check$x[,2],
+                   col = batch, main = "Pre-normalization")
+  post.norm <- plot(pca.check2$x[,1], pca.check2$x[,2],
+                    col = batch, main = "Post-normalization")
+  post.norm.batch <- plot(pca.check3$x[,1], pca.check3$x[,2],
+                          col = batch,
+                          main = "Post-normalization\nand batch correction")
+}
+
+# Visualize
+batch_effects_vis(edata, nedata, combat_nedata)
+dev.off()
+
+# Are any values negative?
+any(sum(as.vector(combat_nedata) < 0))
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~##~~~~~~~~~~~~~~~~~~~~~~~~~~~~~##~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+# Regenerate files excluding outliers
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~##~~~~~~~~~~~~~~~~~~~~~~~~~~~~~##~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#
+
+# Exclude outliers from batch
+pheno2 <- data.frame(pheno[-exclude,])
+rownames(pheno2) <- row.names(red.meta)[-exclude]
+names(pheno2) <- "flowcell"
+
+# Create the batch effect model
+modcombat = model.matrix(~1, data = pheno2)
+# Exclude outliers from expression
+edata <- edata[, -exclude]
+
+# A more strigent variance threshold is needed with these fewer samples
+vars <- apply(edata, 1, var)
+edata <- edata[vars > 1,]
+
+# Quantile normalization
+nedata <- preprocessCore::normalize.quantiles(edata)
+row.names(nedata) <- row.names(edata)
+colnames(nedata) <- colnames(edata)
+
+# Exclude outliers from normalization
+# nedata <- vst(edata)
+
+# Create the batch effect model
+modcombat = model.matrix(~1, data = pheno2)
+
+batch <- as.factor(pheno2$flowcell)
+# Exclude outliers from batch adjustment
+combat_nedata = ComBat(dat = nedata, batch = batch, mod = modcombat,
+                       par.prior = TRUE, prior.plots = FALSE)
+
+batch_effects_vis(edata, nedata, combat_nedata)
+
+# Subset to protein coding for Shoake
+edata_protein <- edata[grep(":protein_coding$", row.names(edata)),] 
+nedata_protein <- nedata[grep(":protein_coding$", row.names(nedata)),]
+combat_nedata_protein <- combat_nedata[grep(":protein_coding$", row.names(combat_nedata)),]
+
+# Saved from "exceRpt_summary.Rmd" where I subsetted the clinical data by removing COPD and ensuring one visit per person
+load("../exceRpt/clinical_subset.Rdata")
+
+# Write filenames to share with Xiting
+# write.table(df$filename, file = "~/Downloads/MG_BkSQ_finalSet_filenames",
+#           row.names = FALSE, col.names = FALSE, quote = FALSE)
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Making RPKM for the nedata_protein file
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# Read in key of protein lengths
+x <- read.table("../exceRpt/gencode_v24_protein_lengths.txt", header = TRUE)
+
+# Find the row matches in the key
+matches <- match(rownames(nedata_protein), x$name)
+
+# rpkm calculation
+nedata_protein_rpkm <- sweep(nedata_protein, 1, x$length[matches], "/")
+
+
+
+
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Visualizing distributions pre norm, post norm, post batch
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+mean_var_plot <- function(input) {
+  means <- apply(input, 1, mean)
+  vars <- apply(input, 1, var)
+  df <- data.frame(means, vars)
+  ggplot(df, aes(log(means), log(vars))) +
+    geom_point() +
+    theme_bw() +
+    labs(title = deparse(substitute(input)))
+}
+grid.arrange(
+  mean_var_plot(edata),
+  mean_var_plot(nedata),
+  mean_var_plot(combat_nedata), ncol = 3)
+
+grid.arrange(
+  mean_var_plot(nedata),
+  mean_var_plot(nedata_protein),
+  mean_var_plot(nedata_protein_rpkm), ncol = 3)
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Batch detection statistic with gPCA
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# install.packages("gPCA")
+library(gPCA)
+system.time({
+  x <- gPCA.batchdetect(t(nedata), batch)
+})
+x$p.val
+x$delta
+x$delta.p
+
+y <- gPCA.batchdetect(t(edata), batch)
+y$p.val
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Batch detection with 
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+summary(nedata)
+
+```

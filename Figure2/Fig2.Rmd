@@ -1,0 +1,775 @@
+---
+title: "novel-cell-types"
+output: html_document
+---
+
+```{r, message=FALSE, warning=FALSE}
+library("knitr")
+library("BiocStyle")
+
+.cran_packages <- c("tidyverse", "Hmisc", "tsne")
+.bioc_packages <- c("monocle")
+.inst <- .cran_packages %in% installed.packages()
+
+if(any(!.inst)) {
+   install.packages(.cran_packages[!.inst])
+}
+.inst <- .bioc_packages %in% installed.packages()
+
+if(any(!.inst)) {
+   source("http://bioconductor.org/biocLite.R")
+   biocLite(.bioc_packages[!.inst], ask = FALSE)
+}
+# Load packages into session, and print package version
+sapply(c(.cran_packages, .bioc_packages), require, character.only = TRUE)
+
+set.seed(12345)
+```
+
+```{r functions}
+match_and_combine <- function(data1, col1, data2, col2) {
+  d1 <- data1[(data1[,col1] %in% data2[,col2]), ]
+  d2 <- data2[(data2[,col2] %in% data1[,col1]), ]
+  
+  m1 <- match(d1[,col1], d2[,col2])
+  
+  return(cbind(d1,d2[m1,]))
+}
+
+```
+
+```{r}
+load("../singleCell/Brian-Barron/GersteinResearch/18-07-19-Monocle.RData")
+```
+
+```{r}
+x <- HSMM.reduced.clust@reducedDimA 
+adf <- HSMM.reduced.clust@phenoData@data %>%
+  data.frame
+```
+
+```{r}
+plotdf <- 
+  x %>%
+  t %>%
+  data.frame %>% 
+  cbind(., adf) %>%
+  mutate(group = diseaseState) %>%
+  mutate(group = gsub("[^asthma|control].*", "reference", group)) %>%
+  mutate(group = capitalize(group)) %>%
+  mutate(cluster.named = Cluster) %>%
+  mutate(cluster.named = gsub(1, "B cells", Cluster)) %>%
+  mutate(cluster.named = gsub(2, "NK cells", cluster.named)) %>%
+  mutate(cluster.named = gsub(3, "Myeloid cells", cluster.named)) %>%
+  mutate(cluster.named = gsub(4, "T cells", cluster.named))
+
+p <-
+  plotdf %>%
+  ggplot(aes(x = X1, y = X2)) +
+  geom_point(aes(color = Cluster)) +
+  facet_wrap(~group) +
+  labs(x = "t-sne 1",
+       y = "t-sne 2") +
+  theme_bw()
+
+ann_text <- data.frame(X1 = c(8, -15, -12, 15), 
+                       X2 = c(-10, -11, 5, 7),
+                       group = factor("Reference", 
+                                      levels = c("Asthma", "Control", "Reference")),
+                       lab = c("B cells", "NK cells", "Myeloid cells", "T cells"))
+
+p + geom_text(data = ann_text, aes(label = lab)) +
+  ggsave("../figures/single-cell_facet-by-group.pdf", height = 3, width = 8)
+```
+
+Facet wrap by cluster, color by Asthma vs Control
+
+```{r}
+plotdf %>%
+  ggplot(aes(X1, X2)) +
+  geom_point(aes(color = group)) +
+  facet_wrap(~cluster.named, scales = "free") +
+  labs(x = "t-sne 1",
+       y = "t-sne 2") +
+  theme_bw() +
+  ggsave("../figures/single-cell-facet-by-cluster.pdf", height = 4, width = 6)
+
+```
+
+
+```{r}
+df <- plotdf %>%
+  filter(group %in% c("Asthma", "Control")) %>%
+  group_by(batch, cluster.named, group) %>% 
+  tally() %>%
+  group_by(batch) %>%
+  mutate(batch_total = sum(n)) %>%
+  mutate(n.fraction = n / batch_total)
+
+df %>%
+  ggplot() +
+  geom_boxplot(aes(x = cluster.named, y = n.fraction, fill = group)) +
+  theme_bw() +
+  labs(x = "Cluster",
+       y = "Fraction of Cells") +
+  ggsave("../figures/monocle-clusters_boxplot.pdf", height = 3, width = 6)
+```
+
+Which are signficantly different between asthmatics and controls? This will have a strong effect on the value of the interpretation. That is, if a new cell type is discovered that's significantly different between asthmatics and controls, that's more valuable in this context than a novel cell type that's the same in each.
+
+An appropriate test for comparing two proportions is a z-test if it's parametric and fisher's exact test if non-parametric. The boxplots lead me to think non-parametric is most appropriate.
+
+```{r}
+# Create a 2x2 contigency table for each of the cell types in the single cell analysis
+z <- 
+  df %>%
+  group_by(group, cluster.named) %>%
+  dplyr::summarize(cells = sum(n),
+                   total = sum(batch_total)) %>%
+  mutate(not.cells = total - cells)
+
+# 2x2 table for each cluster.named
+ct <- list()    
+for (c in z$cluster.named) {
+   tmp <- z %>%
+    filter(cluster.named == c) %>%
+    select(group, cells, not.cells) %>%
+    data.frame
+    
+   rownames(tmp) <- tmp$group
+   ct[[c]] <- fisher.test(as.matrix(tmp[,-1]))$p.value
+}
+
+ct %>%
+  unlist
+```
+
+The myeloid cells are both significantly different between asthmatics and controls and visually have a lot of overlap. I'll see if I can split them into two clusters. 
+
+```{r}
+myeloid <- 
+  plotdf %>%
+  filter(cluster.named == "Myeloid cells")
+
+myeloid <- 
+  myeloid %>%
+  select(X1, X2) %>%
+  dist %>%
+  hclust %>%
+  cutree(., k = 2) %>%
+  cbind(myeloid, .) %>%
+  rename("new.cluster" = ".")
+```
+
+```{r}
+myeloid %>%
+  ggplot(aes(X1, X2)) +
+  geom_point(aes(color = group, shape = factor(new.cluster)),
+             size = 3) +
+  theme_bw()
+```
+
+```{r}
+myeloid.tally <- 
+  myeloid %>%
+  filter(group %in% c("Asthma", "Control")) %>%
+  group_by(batch, new.cluster, group) %>% 
+  tally() %>%
+  group_by(batch) %>%
+  mutate(batch_total = sum(n)) %>%
+  mutate(n.fraction = n / batch_total)
+  
+myeloid.tally %>%
+  ggplot() +
+  geom_boxplot(aes(x = factor(new.cluster), y = n.fraction, fill = group)) +
+  theme_bw() +
+  labs(x = "Myeloid Subcluster",
+       y = "Fraction of Cells") 
+  # ggsave("../figures/monocle-clusters_boxplot.pdf", height = 3, width = 6)
+  # ggplot(aes(X1, X2)) +
+  # geom_point(aes(color = group, shape = factor(new.cluster)))
+```
+
+```{r}
+# Create a 2x2 contigency table for each of the cell types in the single cell analysis
+z2 <- 
+  myeloid.tally %>%
+  group_by(group, new.cluster) %>%
+  dplyr::summarize(cells = sum(n),
+                   total = sum(batch_total)) %>%
+  mutate(not.cells = total - cells)
+
+# 2x2 table for each cluster.named
+ct2 <- list()    
+for (c in z2$new.cluster) {
+   tmp <- z2 %>%
+    filter(new.cluster == c) %>%
+    select(group, cells, not.cells) %>%
+    data.frame
+    
+   rownames(tmp) <- tmp$group
+   ct2[[c]] <- fisher.test(as.matrix(tmp[,-1]))$p.value
+}
+
+ct2 %>%
+  unlist
+```
+
+Both are significantly different, though it seems to me that cluster 2 is more pronouncedly enriched in asthmatics.
+
+# T cells split
+
+```{r}
+tcells <- 
+  plotdf %>%
+  filter(cluster.named == "T cells")
+
+tcells <- 
+  tcells %>%
+  select(X1, X2) %>%
+  dist %>%
+  hclust %>%
+  cutree(., k = 2) %>%
+  cbind(tcells, .) %>%
+  rename("new.cluster" = ".")
+```
+
+```{r}
+tcells %>%
+  ggplot(aes(X1, X2)) +
+  geom_point(aes(color = group, shape = factor(new.cluster)),
+             size = 3) +
+  theme_bw() +
+  
+```
+
+```{r}
+tcells.tally <- 
+  tcells %>%
+  filter(group %in% c("Asthma", "Control")) %>%
+  group_by(batch, new.cluster, group) %>% 
+  tally() %>%
+  group_by(batch) %>%
+  mutate(batch_total = sum(n)) %>%
+  mutate(n.fraction = n / batch_total)
+  
+tcells.tally %>%
+  ggplot() +
+  geom_boxplot(aes(x = factor(new.cluster), y = n.fraction, fill = group)) +
+  theme_bw() +
+  labs(x = "T cells Subcluster",
+       y = "Fraction of Cells") 
+  # ggsave("../figures/monocle-clusters_boxplot.pdf", height = 3, width = 6)
+  # ggplot(aes(X1, X2)) +
+  # geom_point(aes(color = group, shape = factor(new.cluster)))
+```
+
+```{r}
+# Create a 2x2 contigency table for each of the cell types in the single cell analysis
+z3 <- 
+  tcells.tally %>%
+  group_by(group, new.cluster) %>%
+  dplyr::summarize(cells = sum(n),
+                   total = sum(batch_total)) %>%
+  mutate(not.cells = total - cells)
+
+# 2x2 table for each cluster.named
+ct3 <- list()    
+for (c in z3$new.cluster) {
+   tmp <- z3 %>%
+    filter(new.cluster == c) %>%
+    select(group, cells, not.cells) %>%
+    data.frame
+    
+   rownames(tmp) <- tmp$group
+   ct3[[c]] <- fisher.test(as.matrix(tmp[,-1]))$p.value
+}
+
+ct3 %>%
+  unlist
+```
+
+No significant difference observed. I'll stick with the myeloid cell split. 
+
+## Define the new cluster assignments
+
+```{r}
+myeloid.cluster <- 
+  myeloid %>%
+  mutate(myeloid.cluster = paste(Cluster, new.cluster, sep = ".")) %>%
+  select(myeloid.cluster)
+
+plotdf$mod.cluster <- as.character(plotdf$Cluster)
+plotdf$mod.cluster[plotdf$Cluster == 3] <- myeloid.cluster$myeloid.cluster
+
+```
+
+
+```{r check lda 10 with lm22}
+### add by shaoke
+
+load("lda_rf.run3.180412.rdata")
+
+bulkseq.lda.topicdist=lda.bulk10@gamma
+rownames(bulkseq.lda.topicdist) = paste(lda.bulk10@documents,".fq",sep="")
+bulkseq.lda.topicdist = bulkseq.lda.topicdist[rownames(cib.mat),]
+colnames(bulkseq.lda.topicdist)=paste("topic",1:10,sep="")
+
+
+dim.reduc=cbind(bulkseq.lda.topicdist, nmf.clin[,1:7])
+cor <- Hmisc::rcorr(cib.mat, dim.reduc)
+
+
+
+cor.red <- lapply(cor, function(x) x[row.names(x) %in% colnames(cib.mat), 
+                          !row.names(x) %in% colnames(cib.mat)])
+
+cor.red.pos <- cor.red
+
+# Insignificant correlations are left blank
+ggcorrplot(corr = cor.red$r, p.mat = cor.red$P,
+           insig = "blank") +
+  theme(axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10)) +
+  coord_flip()
+  
+ # ggsave("lm22-lda10_nmf7.png", height = 4, width = 9)
+  
+  
+
+cor <- Hmisc::rcorr(cib.mat, bulkseq.lda.topicdist)
+lm.cols=split(cib.mat, col(cib.mat))
+lda.cols=split(bulkseq.lda.topicdist, col(bulkseq.lda.topicdist))
+
+lm2lda.cortest = outer(lm.cols, lda.cols, Vectorize(function(x,y){cor.test(x,y)$p.value;}))
+
+colnames(lm2lda.cortest)=colnames(bulkseq.lda.topicdist)
+rownames(lm2lda.cortest)=colnames(cib.mat)
+
+
+cor.red <- lapply(cor, function(x) x[row.names(x) %in% colnames(cib.mat), 
+                          !row.names(x) %in% colnames(cib.mat)])
+
+cor.red.pos <- cor.red
+threshold <- 0.25
+# find largest pos correlation, change all other p-values to 1
+for (j in colnames(cor.red$r)[grep("top", colnames(cor.red$r))]) {
+  cor.red.pos$P[!cor.red.pos$r[,j] > threshold, j] <- 1
+}
+
+cor.red = cor.red.pos
+# Insignificant correlations are left blank
+ggcorrplot(corr = cor.red$r, p.mat = cor.red$P,
+           insig = "blank") +
+  theme(axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10)) +
+  coord_flip()
+  
+  ggsave("lm22-lda10.png", height = 5, width =5 )
+
+
+
+
+---
+title: "deconvolution-figure"
+author: "Daniel Spakowicz"
+date: "5/30/2018"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+if (!require("install.load")) {
+  install.packages("install.load")
+  library(install.load)
+}
+
+# CRAN packages
+list.of.packages <- c("tidyverse", "ggpubr", "NMF", "Hmisc", "ggcorrplot", 
+                      "nnet", "MASS")
+
+install.load::install_load(list.of.packages)
+```
+
+This is the code used to generate figure 2 of PAPER, in which reads aligned to the human genome protein-coding regions (G) are deconvolved to cell fractions (C) and then correlated with patient clinical variables (P).
+
+```{r load P and G}
+load("../exceRpt/counts.rpm.protein.rpkm.clinical.Rdata")
+```
+
+# Cell signature deconvolution
+
+```{r format reads for cibersort }
+# Grab the matrices of interest
+pro <- all.mats.protein[["rpm"]]
+
+# Reduce names to HUGO convention
+hugo.names <- pro %>% 
+  rownames %>% 
+  gsub(":protein_coding", "", .)
+
+# Format input for CIBERSORT
+cib.input <- data.frame(Gene.symbol = hugo.names, pro)
+
+# Write output as tab-separated file for CIBERSORT web interface
+write.table(cib.input, sep = "\t", row.names = FALSE, quote = FALSE,
+              file = "../deconvolution/cibersort/prot-rpm.tsv")
+```
+
+```{r read in results from cibersort}
+# Read in data and exclude samples with insignificant pvals
+cib.out <- read.csv("../deconvolution/cibersort/CIBERSORT.Output_Job3.csv") %>%
+  filter(P.value <= 0.05) %>%    # remove high pvals
+  dplyr::select(-P.value, -Pearson.Correlation, -RMSE) %>%
+  plyr::rename(c(Input.Sample = "filename"))
+
+# Collapse macrophages into a single category for comparison to cytospin
+macs <- apply(cib.out[, grep("Macrophage", names(cib.out))], 1, sum)
+
+lymphocytes <- apply(cib.out[, grep("^T|^B|^NK", names(cib.out))], 1, sum)
+
+# Integrate macs and convert to long format
+cibj <- data.frame(cib.out,
+                      Macrophages = macs,
+                      Lymphocytes = lymphocytes) %>%
+  gather(cell.type, fraction, -filename) %>%
+  mutate(source = "cibersort")
+```
+
+# Comparing cell signatures to cytospin, Fig2D
+
+```{r cytospin data}
+# Pull cytospin counts from clinical data
+cytospin <- clinical %>%
+  dplyr::select(filename, matches("Abs.*Count.*[S,s]pu.*")) %>%
+  rename_all(~ sub("Abs.*Count\\.+(.*)\\.+[S,s]pu.*", "\\1", .x)) %>%
+  rename_all(~ sub("\\.$", "", .x)) %>%
+  plyr::rename(c(Eosiniphils =  "Eosinophils",
+         Macrophage = "Macrophages")) %>%
+  mutate(filename = make.names(filename))
+
+# Convert to fractions
+cyto.frac <- apply(cytospin[,-1], 1, function(x) x/sum(x)) %>%
+  t
+cyto.frac <- data.frame(filename = cytospin$filename,
+                        cyto.frac) %>%
+  gather(cell.type, fraction, -filename) %>%
+  mutate(source = "cytospin") %>%
+  dplyr::filter(filename %in% cib.out$filename)
+```
+
+```{r join cytospin and cibersort}
+# Join cibersort and cytospin
+cell.fracs <- bind_rows(cyto.frac, cibj)
+
+cyto.names <- c("Neutrophils", "Macrophages", "Eosinophils", "Lymphocytes", "Bronchial.epithelial")
+
+p.scatter <- cell.fracs %>%
+  filter(cell.type %in% cyto.names) %>%
+  mutate(source = factor(source)) %>%
+  spread(source, fraction) %>% 
+  na.omit %>%
+  ggscatter(., x = "cibersort", y = "cytospin", color = "lightgrey") +
+  facet_wrap(~cell.type, scales = "free") +
+  stat_smooth(method = "lm") +
+  theme_bw(base_size = 12) +
+  stat_cor(method = "pearson") +
+  ggsave("../figures/scatterplot_cytospin-comp-cibersort.pdf", 
+         height = 3, width = 5)
+p.scatter
+```
+
+# Unsupervised decomposition by NMF
+
+```{r load nmf results}
+load("../deconvolution/nmf-analysis-rank7-nrun100.Rdata")
+
+h <- t(z@fit@H) 
+colnames(h) <- paste(rep("nmf", ncol(h)), c(1:ncol(h)), sep = " ")
+
+# cibersort to matrix
+cib.mat <- cib.out %>%
+  dplyr::select(-filename) %>%
+  as.matrix
+row.names(cib.mat) <- cib.out$filename
+
+h <- h[match(rownames(cib.mat), rownames(h)),]
+
+```
+
+
+# Comparing cell signatures to single-cell 
+
+# Correlation with clinical matrix
+
+```{r format clinical data}
+# Identify vars that are of interest for correlations
+continuous <- c("Age.at.Visit",  "BMI", "Hospitalizations..Past.Year.", "Hospitalizations..Lifetime.", "Intubations", "Total.Pack.Years", "ACT.Score", "Age.SX.Onset", "Age.Diagnosis","ICS.Total", "OCS.Total", "Number.of.OCS", "FENO", "X.POST..FEV1.FVC.Ratio",  "X.PRE..FEV1.FVC.Ratio", "BDR", "Platelets", "White.Count") 
+
+# Removed because they're so highly correlated
+ # "X.POST..FEV1", "X.POST..FVC", "X.PRE..FEV1", "X.PRE..FVC", "FVC.Pre...PRD", "FVC.Post...PRD", "FEV1.Pre...PRD", "FEV1.Post...PRD",
+
+clinical.conti <- clinical[,names(clinical) %in% continuous] %>%
+  apply(., 2, as.numeric)
+clinical.conti <- data.frame(Input.Sample = make.names(clinical$filename),
+                             clinical.conti)
+
+names(clinical.conti) <- c("Input.Sample", "Age", "BMI", "HPY", 
+                           "HIL", "Intubations", 
+                           "Total Pack Years", "ACT", "Age SX Onset", "Age DX", 
+                           "ICS", "OCS Total", "Number of OCS", "FENO", 
+                           "FEV1/FVC postBD", "FEV1/FVC preBD", 
+                           "BDR", "platelets", "white count")
+#  "FEV1 postBD", "FVC postBD", "FEV1 preBD", "FVC preBD", "FVC pre prd", "FVC post prd", "FEV1 pre prd", "FEV1 post prd",
+
+clinical.mat <- clinical.conti %>%
+  column_to_rownames(., var = "Input.Sample") %>%
+  as.matrix
+
+clinical.mat <- clinical.mat[match(rownames(cib.mat), rownames(clinical.mat)),]
+```
+
+```{r corr plot with nmf and clinical data}
+# Bind with nmf data
+nmf.clin <- cbind(h, clinical.mat)
+
+
+cor <- Hmisc::rcorr(cib.mat, nmf.clin)
+
+cor.red <- lapply(cor, function(x) x[row.names(x) %in% colnames(cib.mat), 
+                          !row.names(x) %in% colnames(cib.mat)])
+
+# Insignificant correlations are left blank
+ggcorrplot(corr = cor.red$r, p.mat = cor.red$P,
+           insig = "blank") +
+  theme(axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10)) +
+  coord_flip()
+  
+
+```
+
+```{r reduce nmf to positive correlations above threshold}
+# allocate memory to new list
+cor.red.pos <- cor.red
+threshold <- 0.25
+# find largest pos correlation, change all other p-values to 1
+for (j in colnames(cor.red$r)[grep("nmf", colnames(cor.red$r))]) {
+  cor.red.pos$P[!cor.red.pos$r[,j] > threshold, j] <- 1
+}
+
+ggcorrplot(corr = cor.red.pos$r, p.mat = cor.red.pos$P,
+           insig = "blank") +
+  theme(axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10)) +
+  coord_flip() 
+  # ggsave("../figures/nmf7-cibersort_correlation.png", height = 4, width = 9)
+
+```
+
+Hmm. This looks good, except for Macrophages.MO. It doesn't make sense for two nmf ranks to have the same cell type.
+
+Perhaps I should try this with the 22-rank nmf to see if it makes more sense.
+
+```{r small separation between the nmf plot and the clinical data}
+# parameters from the ggcorrplot source code
+colors = c("blue", "white", "red"); legend.title = "Corr"; show.diag = FALSE; 
+    colors = c("blue", "white", "red"); outline.color = "gray"; 
+    hc.order = FALSE; hc.method = "complete"; lab = FALSE; lab_col = "black"; 
+    lab_size = 4; sig.level = 0.05; insig = c("pch", 
+        "blank"); pch = 4; pch.col = "black"; pch.cex = 5; tl.cex = 12; 
+    tl.col = "black"; tl.srt = 45; ggtheme = ggplot2::theme_minimal
+
+# Melt corr matrix
+tmp <- cor.red.pos$r %>%
+  data.frame %>%
+  mutate(cell = rownames(cor.red.pos$r)) %>%
+  gather(key, corr, -cell)
+
+# Melt p-value matrix and join to corr
+long.cor.red.pos <- cor.red.pos$P %>%
+  data.frame %>%
+  mutate(cell = rownames(cor.red.pos$P)) %>%
+  gather(key, pvalue, -cell) %>%
+  full_join(., tmp) %>%
+  mutate(key.type = ifelse(
+    stringr::str_detect(key, pattern = "nmf"), 
+    "nmf", "clinical"
+  )) %>%
+  mutate(key.type = factor(key.type, 
+                           levels = c("nmf", "clinical"))) %>%
+  mutate(signif = pvalue <= sig.level) %>%
+  mutate(corr = corr * signif)
+  
+# Plot
+long.cor.red.pos %>%
+  ggplot(aes(cell, key, fill = corr)) +
+  geom_tile(color = "gray") +
+  scale_fill_gradient2(low = colors[1], high = colors[3], 
+        mid = colors[2], midpoint = 0, limit = c(-1, 1), space = "Lab", 
+        name = legend.title) +
+  theme_bw() +
+  coord_flip() +
+  facet_grid(~key.type, scales = "free_x", space = "free") +
+    theme(axis.text.x = ggplot2::element_text(angle = tl.srt, 
+        vjust = 1, size = 11, hjust = 1), 
+        axis.text.y = ggplot2::element_text(size = 11),
+        strip.text.x = element_blank()) +
+  labs(x = "", y = "") +
+  ggsave("../figures/nmf7-cibersort_correlation.pdf", height = 5, width = 9)
+
+```
+
+```{r check nmf rank 22}
+load("../deconvolution/nmf-analysis-rank22-nrun100.Rdata")
+
+h <- t(z@fit@H) 
+colnames(h) <- paste(rep("nmf", ncol(h)), c(1:ncol(h)), sep = " ")
+
+h <- h[match(rownames(cib.mat), rownames(h)),]
+
+cor.22.red <- lapply(cor.22, function(x) x[row.names(x) %in% colnames(cib.mat), 
+                          !row.names(x) %in% colnames(cib.mat)]) 
+
+# Insignificant correlations are left blank
+ggcorrplot(corr = cor.22.red$r, p.mat = cor.22.red$P,
+           insig = "blank") +
+  theme(axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10)) +
+  coord_flip() +
+  ggsave("../figures/nmf22-cibersort_correlation.pdf")
+```
+
+That does not look better than the 7-rank result. I'll stick with rank 7.
+
+```{r categorical vars}
+categorical <- c("filename", "Gender", "Race..Name.", "Marital.Status", "Atopy..Yes.No.", "Flare..Yes.No.", "Asthma.Severity", "SARP.Cluster.Designation", "group")
+
+
+bin.cat <- c("Atopy..Yes.No.", "Flare..Yes.No.", "group")
+
+noord.cat <- c("SARP.Cluster.Designation", "Asthma.Severity")
+
+ord.cat <- c("Asthma.Severity")
+
+names.categorical <- c("filename", "Gender", "Race", "Marital.Status", "Atopy",
+                        "Flare", "Asthma.Severity", "SARP", "group")
+
+celltypes <- names(cib.out)[-1]
+
+subset_and_merge <- function(cat.vars, full.clinical, cell.fracs) {
+  clin.cell <- full.clinical[ , names(full.clinical) %in% cat.vars] %>%
+    mutate(filename = make.names(filename)) %>%
+    filter(filename %in% cell.fracs$filename) %>%
+    left_join(., cell.fracs, by = "filename")
+}
+
+cat_df <- subset_and_merge(categorical, clinical, cib.out)
+
+# Multinomial model for SARP clusters -- non-ordered categories
+noord.cat.p <- list()
+for (o in noord.cat) {
+  tmp_df <- cat_df[!is.na(cat_df[[o]]), ]
+  tmp_df[[o]] <- factor(tmp_df[[o]])
+  for (c in celltypes) {
+    f <- formula(paste(o, "~", c, sep = " "))
+    m <- multinom(f, data = tmp_df, trace = FALSE) 
+    z <- summary(m)$coefficients/summary(m)$standard.errors
+    noord.cat.p[[o]][[c]] <- (1 - pnorm(abs(z[,2]), 0, 1)) * 2
+  }
+}
+sig.noord <- noord.cat.p %>%
+  lapply(., function(x) do.call(cbind, x)) %>%
+  lapply(., function(x) apply(x, 2, function(y) any(y < 0.05))) %>%
+  lapply(., function(x) names(x)[which(x)]) %>%
+  unlist
+sig.noord
+```
+
+The SARP clusters show significantly different macrophages M0 and activated mast cells. There were no significant differences by asthma severity.
+
+```{r}
+# Ordinal model for Asthma Severity
+ord.cat.p <- list()
+for (o in ord.cat) {
+  tmp_df <- cat_df[!is.na(cat_df[[o]]), ]
+  tmp_df[[o]] <- factor(tmp_df[[o]])
+  for (c in celltypes) {
+    f <- formula(paste(o, "~", c, sep = " "))
+    m <- polr(f, data = tmp_df, Hess = TRUE) 
+    ord.cat.p[[o]][[c]] <- lmtest::coeftest(m)[,4]
+  }
+}
+sig.ord <- ord.cat.p %>%
+  lapply(., function(x) do.call(cbind, x)) %>%
+  lapply(., function(x) apply(x, 2, function(y) any(y < 0.05))) %>%
+  lapply(., function(x) names(x)[which(x)]) %>%
+  unlist
+sig.ord
+```
+
+Literally all of them are significant in the ordinal model, when zero are significant in the multinomial model? No way. I'm going with the multinomial result to be conservative, until I read more about this to figure out why they're so different. I assume there's a problem with the p-value calculation of the probit model, where it assumes they're normal or something like that. I think the multinomial model also assumes normality, though, so I'm not sure why they're different.
+
+```{r binary categorical var sig test}
+yn.cat <- c("Atopy..Yes.No.", "Flare..Yes.No.")
+
+yn.krus.p <- list()
+yn.wil.p <- list()
+for (o in yn.cat) {
+  tmp_df <- cat_df[grep("Yes|No", cat_df[[o]]), ]
+  # tmp_df <- cat_df[!is.na(cat_df[[o]]), ]
+  tmp_df[[o]] <- droplevels(factor(tmp_df[[o]]))
+  for (c in celltypes) {
+    f <- formula(paste(c, "~", o, sep = " "))
+    m <- kruskal.test(f, data = tmp_df)$p.value
+    w <- wilcox.test(f, data = tmp_df)$p.value
+    yn.krus.p[[o]][c] <- m
+    yn.wil.p[[o]][c] <- w
+  }
+}
+do.call(cbind, yn.krus.p)
+do.call(cbind, yn.wil.p)
+```
+
+No signficantly different cell groups by flare or atopy.
+
+```{r}
+g.cat <- "group"
+g.krus.p <- list()
+g.wil.p <- list()
+for (o in g.cat) {
+  tmp_df <- cat_df[!is.na(cat_df[[o]]), ]
+  tmp_df[[o]] <- droplevels(factor(tmp_df[[o]]))
+  for (c in celltypes) {
+    f <- formula(paste(c, "~", o, sep = " "))
+    m <- kruskal.test(f, data = tmp_df)$p.value
+    w <- wilcox.test(f, data = tmp_df)$p.value
+    g.krus.p[[o]][c] <- m
+    g.krus.p[[o]][c] <- w
+  }
+}
+do.call(cbind, g.krus.p)
+do.call(cbind, g.krus.p)
+```
+
+No significant cell types by group. 
+
+```{r plotting categorical differences}
+p.df <- subset_and_merge(c("filename", "SARP.Cluster.Designation"), clinical, cib.out)
+
+p.df %>%
+  gather(cell, fraction, -SARP.Cluster.Designation, -filename) %>%
+  na.omit %>%
+  filter(cell == c("Macrophages.M0", "Mast.cells.activated")) %>%
+  ggplot(aes(factor(SARP.Cluster.Designation), fraction)) +
+  geom_boxplot(aes(fill = factor(SARP.Cluster.Designation)), show.legend = FALSE) +
+  facet_wrap(~cell, scales = "free") +
+  theme_bw(base_size = 12) +
+  scale_fill_brewer(palette = "Spectral") +
+  labs(x = "SARP cluster",
+       y = "Fraction") +
+  ggsave("../figures/cibersort_categorical-vars.pdf", height = 2, width = 6)
+```
+
+

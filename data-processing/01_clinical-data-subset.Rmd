@@ -1,0 +1,303 @@
+---
+title: "01_clinical-data-subset"
+author: "Daniel Spakowicz"
+date: "3/1/2018"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+if (!require("install.load")) {
+  install.packages("install.load")
+  library(install.load)
+}
+
+# CRAN packages
+list.of.packages <- c("tidyverse")
+install.load::install_load(list.of.packages)
+```
+
+The purpose of this script is to load the YCAAD study dataset and RNAseq metadata and subset to the appropriate samples. 
+
+```{r clinical read in and clean}
+# Read in Vera & Qing's clinical data
+# Last updated 06 Feb 2017 by Vera subject:dataset 
+clinical <- read.csv("../sample_data/study_dataset_02062017_04_37_59_pm.csv", 
+                     stringsAsFactors = FALSE, na.strings = "NaN")
+
+# Last updated 15 Jan 2017 by Vera <no subject> "Dear Dan, master spreadsheet for bulqseq analysis in csv is attached" 
+# clinical <- read.csv(file = "../sample_data/bulqseq dataset clinical data.csv", 
+#                       stringsAsFactors = FALSE, na.strings = "NaN")
+clinical$Visit.Date <- as.Date(clinical$Visit.Date, format = "%m/%d/%Y")
+```
+
+```{r qings list}
+# Read in Qing's key for which Study ID equates to the bulkseq id
+qing <- read.csv("../sample_data/List of Bulk Seq samples submitted to Keck.csv",
+                 skip = 1, strip.white = TRUE, stringsAsFactors = FALSE)
+
+# Remove lines with text about Genes (not sample data)
+qing <- qing[-grep("Genex.*|Samples.*|^$", qing$Samples),]
+
+# Rename col 1
+names(qing)[1] <- "Bulkseq.ID"
+
+# Function to fix typos
+fix_individual_typos <- function(input){
+  qing <- input
+  qing$Visit.Date <- gsub("//", "/", qing$Visit.Date, fixed = TRUE)
+  qing$Study.ID <- gsub("-C", "", qing$Study.ID, fixed = TRUE)
+  qing$Study.ID <- gsub("N113", "N-113", qing$Study.ID, fixed = TRUE)
+  qing$Study.ID <- gsub("A306", "A-306", qing$Study.ID, fixed = TRUE)
+  
+  # Change visit dates to match clinical data (manually found)
+  qing$Visit.Date[which(qing$Bulkseq.ID == "BkSQ-205")] <- "05/05/16"
+  qing$Visit.Date[which(qing$Bulkseq.ID == "BkSQ-75")] <- "01/13/15"
+  qing$Visit.Date[which(qing$Bulkseq.ID == "BkSQ-164")] <- "10/28/15"
+  qing$Visit.Date[which(qing$Bulkseq.ID == "BkSQ-211")] <- "06/08/16"
+  qing$Visit.Date[which(qing$Bulkseq.ID == "BkSQ-202")] <- "04/20/16"
+  # Convert to 4 digit year (adding 20YY to the YY)
+  qing$Visit.Date <- gsub("(\\d+/\\d+/)(\\d{2}$)", "\\120\\2", qing$Visit.Date)
+  
+  qing$Visit.Date <- as.Date(qing$Visit.Date, format = "%m/%d/%Y")
+  
+  return(qing)
+}
+
+qing.clean <- fix_individual_typos(qing)
+
+# Merge with clinical data
+cq <- full_join(qing.clean, clinical, by = c("Study.ID", "Visit.Date"), all)
+```
+
+
+```{r Jose group designations}
+# Amended names 19 Dec 2016
+# Jose returned the following file that contains a few new designations 
+jose.grp <- read.csv("../sample_data/Asthma-classification.csv", stringsAsFactors = FALSE)
+
+# subset and rename
+jose.grp <- data.frame(Bulkseq.ID = jose.grp$Bulkseq.ID, 
+                         Asthma.Severity = jose.grp$Asthma.Severity, 
+                         group = jose.grp$Classification, stringsAsFactors = FALSE)
+
+# Bind to clinical data
+cqj <- left_join(cq, jose.grp, by = c("Bulkseq.ID", "Asthma.Severity"))
+```
+
+
+
+```{r define groups}
+# Create a group categorical variable with a reduced set of conditions
+
+# Set controls
+cqj$group[grep("1\\. Control", cqj$Designated.Study.Group.s.)] <- "Control"
+
+# Set asthmatics
+cqj$group[grep("3\\. Asthma|6\\. Exercise Induced Bronchospasm", cqj$Designated.Study.Group.s.)] <- "Asthma"
+
+# Set COPD only 
+cqj$group[grep("4\\. COPD", cqj$Designated.Study.Group.s.)] <- "COPD"
+
+# Set Asthma/COPID
+cqj$group[grep("5\\. Asthma/COPD", cqj$Designated.Study.Group.s.)] <- "Asthma/COPD"
+
+# Define NA or undiagnosed as "Other"
+cqj$group[which(is.na(cqj$group))] <- "Other"
+cqj$group[grep("Cough|Undiagnosed", cqj$group)] <- "Other"
+
+# Adjust ordering of group levels
+cqj$group <- factor(cqj$group, levels = c("Control", "Asthma", "Asthma/COPD", "COPD", "Other"))
+```
+
+
+```{r other cleaning}
+# Change unlabeled race cells to NA
+cqj$Race..Name.[which(cqj$Race..Name. == "^$")] <- NA
+
+# Set very high BMI's to NA -- expected typos
+cqj$BMI[which(cqj$BMI > 80)] <- NA
+```
+
+```{r meta read in and clean, warning = FALSE}
+# Read in Chris Castaldi's file of paths and RIN values
+# Meta data including the batch information
+meta <- read.csv("../sample_data/chas_pathsMetadata.csv", stringsAsFactors = FALSE)
+
+# Function to clean the data and prepare for merging
+cleanMetadata <- function(meta) {
+  # Remove samples without sequencing data
+  meta <- meta[!is.na(meta$Path),]
+  # Parse path
+  path <- separate(meta, Path, into = c("X1", "X2", "X3", "X4", "X5", "X6", 
+                                        "X7", "X9", "X10", "X11", "X12", "filename.base", "X14"), 
+                   sep = "/") 
+  
+  # One column is shifted, clean up
+  badrows <- grep("illumina", path[,grep("illumina", path)])
+  
+  # Remove the "illumina" column missing from most paths
+  needcleaning <- path[badrows,]
+  needcleaning[, grep("illumina", needcleaning)] <- NULL
+  
+  # Unify and merge
+  path <- path[-badrows,]
+  path$X14 <- NULL
+  
+  names(needcleaning) <- names(path)
+  
+  path <- rbind(path, needcleaning)
+  
+  # Separate out run date and flowcell
+  path <- separate(path, X6, into = c("date", "sequencer.ser.num", "run.num", "flowcell"))
+  
+  # Format the date
+  path$date <- as.Date(path$date, format = "%y%m%d")
+  
+  # Bind the useful path information back on
+  meta <- data.frame(meta, path[,c("date", "sequencer.ser.num", "run.num", "flowcell", "filename.base")])
+  
+  # Fix the sample names at the bottom of the file (the "B-BSEQ" set)
+  meta$sample.appended[grep("_", meta$sample)] <- gsub(".*_(.*)", "\\1", meta$sample[grep("_", meta$sample)])
+  meta$sample[grep("_", meta$sample)] <- gsub("(.*)_.*", "\\1", meta$sample[grep("_", meta$sample)])
+  
+  # Adjust names to match col names of the gencode file
+  meta$filename.col <- make.names(meta$filename.base)
+  
+  # Find the duplicates (multiply-sequenced files)
+  duplicates <- meta$filename.col[duplicated(meta$filename.col)]
+  
+  # Remove  the duplicate with the earliest sequencing date
+  toremove <- c()
+  for (d in duplicates) {
+    nums <- min(grep(d, meta$filename.col))
+    toremove[d] <- nums[which.min(meta$date[nums])]
+  }
+  meta <- meta[-toremove,]
+  
+  return(meta)
+}
+meta <- cleanMetadata(meta)
+```
+
+```{r readcounts read in and clean}
+# Date of last exceRpt update
+date <- "2017-01-21"
+
+# Read in the Read Mapping Summary file
+readcounts <- read.table(paste("../exceRpt", date, 
+                  "exceRpt_readMappingSummary.txt", sep = "/"), 
+                  row.names = NULL, stringsAsFactors = FALSE)
+# Name file col
+names(readcounts)[1] <- "filename"
+
+# clean sequencing file names to remove bits after the sample id information
+removeFq <- function(x) {
+  x <- gsub("_R1_all.fq", "", x)
+  x <- gsub("_all.fq", "", x)
+  x <- gsub(".fq", "", x)
+  return(x)
+}
+
+# Parse filename to match sample in meta data file
+readcounts$filename.base <- removeFq(readcounts$filename)
+
+# Parse filename to match Bulkseq.ID in clinical data file
+readcounts$Bulkseq.ID <- gsub("Sample_(.*)_.*", "\\1", readcounts$filename.base)
+```
+
+```{r merge readcounts clinical and metadata}
+# merge meta and clinical data
+clin.meta <- merge(meta, cqj, by.x = "sample", by.y = "Bulkseq.ID", 
+                   all = TRUE)
+
+# merge with readcounts
+read.clin.meta <- merge(readcounts, clin.meta, by = "filename.base", all = TRUE)
+
+# Tidy up
+rm(clin.meta)
+```
+
+# Subsetting to analysis files
+
+```{r have sequencing data}
+# Remove rows without a "filename"
+df <- read.clin.meta[!is.na(read.clin.meta$filename), ]
+```
+
+The number of rows that have RNAseq file names is `r nrow(df)`.
+
+```{r have clinical data}
+# Remove rows without a "Study.ID"
+df <- df[!is.na(df$Study.ID),]
+```
+
+The number of rows that also contain a `Study.ID` (as a marker for clinical data) is `r nrow(df)`.
+
+```{r remove exceRpt processing failure}
+# Remove sample with file that failed processing
+df <- df[-(grep("BkSQ-65_007", df$filename)),]
+```
+
+
+```{r best data}
+# If sequenced multiple times, keep the replicate with the highest gencode mapping
+df$genconde.perc <- (df$gencode_sense + df$gencode_antisense) / df$input
+df <- df[order(df$Bulkseq.ID, -df$genconde.perc),]
+df <- df[!duplicated(df$Bulkseq.ID),]
+```
+
+Including only one file when a sample was sequenced multiple times for technical reasons the number of samples is `r nrow(df)`.
+
+```{r}
+# If multiple samples from the same individual, keep the first (others to be used later)
+df$Visit.Date <- as.Date(df$Visit.Date, format = "%m/%d/%Y")
+df <- df[order(df$Study.ID, df$Visit.Date),]
+df <- df[!duplicated(df$Study.ID),]
+```
+
+Including only the first visit from individuals with multiple sequenced samples, the number of samples is `r nrow(df)`.
+
+```{r}
+# Keep only asthmatics and controls ############################## <--- Major change
+df <- df[df$group == "Asthma" | df$group == "Control", ]
+```
+
+Keeping only asthmatics and controls, the number of samples is `r nrow(df)`.
+
+```{r removing unlabeled severity}
+# Put "Control" in Asthma Severity column for controls
+df$Asthma.Severity[df$group == "Control"] <- "Control"
+
+# Remove 6 samples with unlabled asthma severity
+df <- df[!(df$Asthma.Severity == ""),]
+
+# Remove NA cols
+df <- df[!is.na(df$filename),]
+```
+
+Excluding samples with unclassified asthma severity, the number of samples is `r nrow(df)`.
+
+```{r quality threshold}
+# Apply the "fraction mapping to transcripts" QC threshold
+threshold <- 0.5 
+
+# Identify rows below threshold
+belowthreshold <- ((df$gencode_sense + df$gencode_antisense) / df$genome) < threshold
+belowthreshold <- (df$gencode_sense / df$genome) < threshold
+
+# exclude those below threshold
+df <- df[-belowthreshold,]
+
+df$filename.col <- make.names(df$filename)
+```
+
+Excluding samples with \(< `r threshold`\) transcript enrichment, the number of samples is `r nrow(df)`.
+
+```{r save}
+save(df, file = "../exceRpt/clinical_subset.Rdata")
+```
+

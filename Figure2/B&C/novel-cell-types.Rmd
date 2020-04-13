@@ -1,0 +1,345 @@
+---
+title: "novel-cell-types"
+output: html_document
+---
+
+```{r, message=FALSE, warning=FALSE}
+library("knitr")
+library("BiocStyle")
+library(monocle)
+library(Hmisc)
+BiocManager::install(c("monocle"))
+
+devtools::install_github("kassambara/ggpubr")
+library(ggpubr)
+
+
+.cran_packages <- c("tidyverse", "Hmisc", "tsne")
+.bioc_packages <- c("monocle")
+.inst <- .cran_packages %in% installed.packages()
+
+if(any(!.inst)) {
+   install.packages(.cran_packages[!.inst])
+}
+.inst <- .bioc_packages %in% installed.packages()
+
+if(any(!.inst)) {
+   source("http://bioconductor.org/biocLite.R")
+   biocLite(.bioc_packages[!.inst], ask = FALSE)
+}
+# Load packages into session, and print package version
+sapply(c(.cran_packages, .bioc_packages), require, character.only = TRUE)
+
+set.seed(12345)
+```
+
+```{r functions}
+match_and_combine <- function(data1, col1, data2, col2) {
+  d1 <- data1[(data1[,col1] %in% data2[,col2]), ]
+  d2 <- data2[(data2[,col2] %in% data1[,col1]), ]
+  
+  m1 <- match(d1[,col1], d2[,col2])
+  
+  return(cbind(d1,d2[m1,]))
+}
+
+```
+
+```{r}
+load("../singleCell/Brian-Barron/GersteinResearch/18-07-19-Monocle.RData")
+```
+
+```{r}
+x <- HSMM.reduced.clust@reducedDimA 
+adf <- HSMM.reduced.clust@phenoData@data %>%
+  data.frame
+
+write.csv(plotdf, file = "~/Downloads/novel-cell-types_plotdf.csv")
+```
+
+```{r}
+plotdf <- 
+  x %>%
+  t %>%
+  data.frame %>% 
+  cbind(., adf) %>%
+  mutate(group = diseaseState) %>%
+  mutate(group = gsub("[^asthma|control].*", "reference", group)) %>%
+  mutate(group = capitalize(group)) %>%
+  mutate(cluster.named = Cluster) %>%
+  mutate(cluster.named = gsub(1, "B cells", Cluster)) %>%
+  mutate(cluster.named = gsub(2, "NK cells", cluster.named)) %>%
+  mutate(cluster.named = gsub(3, "Myeloid cells", cluster.named)) %>%
+  mutate(cluster.named = gsub(4, "T cells", cluster.named))
+
+p <-
+  plotdf %>%
+  ggplot(aes(x = X1, y = X2)) +
+  geom_point(aes(color = Cluster)) +
+  facet_wrap(~group) +
+  labs(x = "t-sne 1",
+       y = "t-sne 2") +
+  theme_bw()
+
+ann_text <- data.frame(X1 = c(8, -15, -12, 15), 
+                       X2 = c(-10, -11, 5, 7),
+                       group = factor("Reference", 
+                                      levels = c("Asthma", "Control", "Reference")),
+                       lab = c("B cells", "NK cells", "Myeloid cells", "T cells"))
+
+p + geom_text(data = ann_text, aes(label = lab)) +
+  ggsave("../figures/single-cell_facet-by-group.pdf", height = 3, width = 8)
+```
+
+Facet wrap by cluster, color by Asthma vs Control
+
+```{r}
+plotdf %>%
+  ggplot(aes(X1, X2)) +
+  geom_point(aes(color = group)) +
+  facet_wrap(~cluster.named, scales = "free") +
+  labs(x = "t-sne 1",
+       y = "t-sne 2") +
+  theme_bw() +
+  ggsave("../figures/single-cell-facet-by-cluster.pdf", height = 4, width = 6)
+
+```
+
+# Figure 2C
+## Boxplot of relative abundances of each cluster by patient
+
+```{r}
+df <- plotdf %>%
+  filter(group %in% c("Asthma", "Control")) %>%
+  group_by(batch, cluster.named, group) %>% 
+  tally() %>%
+  group_by(batch) %>%
+  mutate(batch_total = sum(n)) %>%
+  mutate(n.fraction = n / batch_total)
+
+df <- 
+  df %>%
+  select(-n.fraction, -batch_total) %>%
+  spread(cluster.named, n) %>%
+  mutate(`B cells` = ifelse(is.na(`B cells`), 0, `B cells`)) %>%
+  gather(-batch, -group, key = "cluster.named", value = "n") %>%
+  group_by(batch) %>%
+  mutate(batch_total = sum(n)) %>%
+  mutate(n.fraction = n / batch_total)
+
+wtpvals.greater <- list()
+for (c in unique(df$cluster.named)) {
+  wtpvals.greater[[c]] <- wilcox.test(n.fraction ~ group, data = df[df$cluster.named == c,], alternative = "greater")$p.value
+}
+
+mye.annot <- wtpvals.greater %>% unlist
+```
+
+```{r}
+df %>%
+  ggplot(aes(cluster.named, n.fraction)) +
+  geom_boxplot(aes(fill = group)) +
+  geom_signif(y_position = c(0.8), 
+                xmin=c(1.8), 
+                xmax = c(2.2),
+                annotation = c(paste0("p-value = ", round(mye.annot[2], 2))), 
+                tip_length = 0.02,
+              textsize = 3.8) +
+  theme_minimal() +
+  labs(x = "Cluster",
+       y = "Fraction of Cells") +
+  ggsave("../figures/monocle-clusters_boxplot.pdf", height = 3, width = 6)
+  
+```
+
+
+Which are signficantly different between asthmatics and controls? This will have a strong effect on the value of the interpretation. That is, if a new cell type is discovered that's significantly different between asthmatics and controls, that's more valuable in this context than a novel cell type that's the same in each.
+
+An appropriate test for comparing two proportions is a z-test if it's parametric and fisher's exact test if non-parametric. The boxplots lead me to think non-parametric is most appropriate.
+
+```{r}
+# Create a 2x2 contigency table for each of the cell types in the single cell analysis
+z <- 
+  df %>%
+  group_by(group, cluster.named) %>%
+  dplyr::summarize(cells = sum(n),
+                   total = sum(batch_total)) %>%
+  mutate(not.cells = total - cells)
+
+# 2x2 table for each cluster.named
+ct <- list()    
+for (c in z$cluster.named) {
+   tmp <- z %>%
+    filter(cluster.named == c) %>%
+    select(group, cells, not.cells) %>%
+    data.frame
+    
+   rownames(tmp) <- tmp$group
+   ct[[c]] <- fisher.test(as.matrix(tmp[,-1]))$p.value
+}
+
+ct %>%
+  unlist %>%
+  p.adjust(., method = "fdr")
+```
+
+The myeloid cells are both significantly different between asthmatics and controls and visually have a lot of overlap. I'll see if I can split them into two clusters. 
+
+```{r}
+myeloid <- 
+  plotdf %>%
+  filter(cluster.named == "Myeloid cells")
+
+myeloid <- 
+  myeloid %>%
+  select(X1, X2) %>%
+  dist %>%
+  hclust %>%
+  cutree(., k = 2) %>%
+  cbind(myeloid, .) %>%
+  rename("new.cluster" = ".")
+```
+
+```{r}
+myeloid %>%
+  ggplot(aes(X1, X2)) +
+  geom_point(aes(color = group, shape = factor(new.cluster)),
+             size = 3) +
+  theme_bw()
+```
+
+```{r}
+myeloid.tally <- 
+  myeloid %>%
+  filter(group %in% c("Asthma", "Control")) %>%
+  group_by(batch, new.cluster, group) %>% 
+  tally() %>%
+  group_by(batch) %>%
+  mutate(batch_total = sum(n)) %>%
+  mutate(n.fraction = n / batch_total)
+  
+myeloid.tally %>%
+  ggplot() +
+  geom_boxplot(aes(x = factor(new.cluster), y = n.fraction, fill = group)) +
+  theme_bw() +
+  labs(x = "Myeloid Subcluster",
+       y = "Fraction of Cells") 
+  # ggsave("../figures/monocle-clusters_boxplot.pdf", height = 3, width = 6)
+  # ggplot(aes(X1, X2)) +
+  # geom_point(aes(color = group, shape = factor(new.cluster)))
+```
+
+```{r}
+# Create a 2x2 contigency table for each of the cell types in the single cell analysis
+z2 <- 
+  myeloid.tally %>%
+  group_by(group, new.cluster) %>%
+  dplyr::summarize(cells = sum(n),
+                   total = sum(batch_total)) %>%
+  mutate(not.cells = total - cells)
+
+# 2x2 table for each cluster.named
+ct2 <- list()    
+for (c in z2$new.cluster) {
+   tmp <- z2 %>%
+    filter(new.cluster == c) %>%
+    select(group, cells, not.cells) %>%
+    data.frame
+    
+   rownames(tmp) <- tmp$group
+   ct2[[c]] <- fisher.test(as.matrix(tmp[,-1]))$p.value
+}
+
+ct2 %>%
+  unlist
+```
+
+Both are significantly different, though it seems to me that cluster 2 is more pronouncedly enriched in asthmatics.
+
+# T cells split
+
+```{r}
+tcells <- 
+  plotdf %>%
+  filter(cluster.named == "T cells")
+
+tcells <- 
+  tcells %>%
+  select(X1, X2) %>%
+  dist %>%
+  hclust %>%
+  cutree(., k = 2) %>%
+  cbind(tcells, .) %>%
+  rename("new.cluster" = ".")
+```
+
+```{r}
+tcells %>%
+  ggplot(aes(X1, X2)) +
+  geom_point(aes(color = group, shape = factor(new.cluster)),
+             size = 3) +
+  theme_bw() +
+  
+```
+
+```{r}
+tcells.tally <- 
+  tcells %>%
+  filter(group %in% c("Asthma", "Control")) %>%
+  group_by(batch, new.cluster, group) %>% 
+  tally() %>%
+  group_by(batch) %>%
+  mutate(batch_total = sum(n)) %>%
+  mutate(n.fraction = n / batch_total)
+  
+tcells.tally %>%
+  ggplot() +
+  geom_boxplot(aes(x = factor(new.cluster), y = n.fraction, fill = group)) +
+  theme_bw() +
+  labs(x = "T cells Subcluster",
+       y = "Fraction of Cells") 
+  # ggsave("../figures/monocle-clusters_boxplot.pdf", height = 3, width = 6)
+  # ggplot(aes(X1, X2)) +
+  # geom_point(aes(color = group, shape = factor(new.cluster)))
+```
+
+```{r}
+# Create a 2x2 contigency table for each of the cell types in the single cell analysis
+z3 <- 
+  tcells.tally %>%
+  group_by(group, new.cluster) %>%
+  dplyr::summarize(cells = sum(n),
+                   total = sum(batch_total)) %>%
+  mutate(not.cells = total - cells)
+
+# 2x2 table for each cluster.named
+ct3 <- list()    
+for (c in z3$new.cluster) {
+   tmp <- z3 %>%
+    filter(new.cluster == c) %>%
+    select(group, cells, not.cells) %>%
+    data.frame
+    
+   rownames(tmp) <- tmp$group
+   ct3[[c]] <- fisher.test(as.matrix(tmp[,-1]))$p.value
+}
+
+ct3 %>%
+  unlist
+```
+
+No significant difference observed. I'll stick with the myeloid cell split. 
+
+## Define the new cluster assignments
+
+```{r}
+myeloid.cluster <- 
+  myeloid %>%
+  mutate(myeloid.cluster = paste(Cluster, new.cluster, sep = ".")) %>%
+  select(myeloid.cluster)
+
+plotdf$mod.cluster <- as.character(plotdf$Cluster)
+plotdf$mod.cluster[plotdf$Cluster == 3] <- myeloid.cluster$myeloid.cluster
+
+```
+
