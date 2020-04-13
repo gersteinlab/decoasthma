@@ -1,4 +1,4 @@
-# decoasthma 
+# decoasthma [![DOI](https://zenodo.org/badge/255353495.svg)](https://zenodo.org/badge/latestdoi/255353495)
 Code to reproduce the analyses described in the manuscript, "Approaches for integrating heterogeneous RNA-seq data reveals cross-talk between microbes and genes in asthmatic patients," in which we describe a method we dubbed LDA-link for relating microbes to genes within heterogeneous or noisy RNA-seq data. 
 
 The manuscript has been posted on bioRxiv, here:
